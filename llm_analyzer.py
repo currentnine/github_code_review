@@ -1,6 +1,8 @@
 import requests
 import json
+import time
 from typing import Dict, List, Optional
+from tqdm import tqdm
 from config import Config
 
 class LLMAnalyzer:
@@ -35,13 +37,16 @@ class LLMAnalyzer:
             print("Ollama가 실행 중인지 확인해주세요: ollama serve")
             return None
     
-    def analyze_code(self, code: str, file_path: str, language: str = "") -> Dict:
+    def analyze_code(self, code: str, file_path: str, language: str = "", progress_bar: tqdm = None) -> Dict:
         """단일 파일 코드 분석"""
-        print(f"{file_path} 분석 중...")
+        if progress_bar:
+            progress_bar.set_description(f"분석 중: {file_path}")
         
         # 언어 자동 감지
         if not language:
             language = self._detect_language(file_path)
+        
+        start_time = time.time()
         
         prompt = f"""다음 {language} 코드를 분석해서 JSON 형태로 결과를 반환해주세요:
 
@@ -85,43 +90,63 @@ class LLMAnalyzer:
         
         response = self._call_ollama(prompt)
         
+        analysis_time = time.time() - start_time
+        
+        if progress_bar:
+            progress_bar.set_postfix({"시간": f"{analysis_time:.1f}s"})
+        
         if response:
             try:
                 # JSON 파싱 시도
                 result = self._parse_json_response(response)
                 return result
             except Exception as e:
-                print(f"분석 결과 파싱 오류: {e}")
+                if progress_bar:
+                    progress_bar.write(f"분석 결과 파싱 오류 ({file_path}): {e}")
                 return self._create_fallback_result(response)
         
         return self._create_empty_result()
     
     def analyze_multiple_files(self, files: List[Dict]) -> Dict:
         """여러 파일 통합 분석"""
-        print(f"{len(files)}개 파일 분석 시작...")
+        total_files = len(files[:Config.MAX_FILES_PER_ANALYSIS])
+        print(f"AI 코드 분석 시작: {total_files}개 파일")
         
         results = []
         total_score = 0
+        start_time = time.time()
         
-        for file_info in files[:Config.MAX_FILES_PER_ANALYSIS]:
-            if file_info.get('content'):
-                result = self.analyze_code(
-                    file_info['content'], 
-                    file_info['path']
-                )
-                result['file_path'] = file_info['path']
-                results.append(result)
-                total_score += result.get('overall_score', 5.0)
+        with tqdm(total=total_files, desc="코드 분석", unit="파일") as pbar:
+            for file_info in files[:Config.MAX_FILES_PER_ANALYSIS]:
+                if file_info.get('content'):
+                    result = self.analyze_code(
+                        file_info['content'], 
+                        file_info['path'],
+                        progress_bar=pbar
+                    )
+                    result['file_path'] = file_info['path']
+                    results.append(result)
+                    total_score += result.get('overall_score', 5.0)
+                    
+                    pbar.update(1)
+                    
+                    # 간격 추가 (LLM 서버 부하 방지)
+                    time.sleep(0.5)
+        
+        total_time = time.time() - start_time
         
         # 전체 통계 계산
         avg_score = total_score / len(results) if results else 0
         total_issues = sum(len(r.get('issues', [])) for r in results)
+        
+        print(f"분석 완료! 소요시간: {total_time:.1f}초")
         
         return {
             'summary': {
                 'total_files': len(results),
                 'average_score': round(avg_score, 1),
                 'total_issues': total_issues,
+                'analysis_time': round(total_time, 1),
                 'analysis_timestamp': self._get_timestamp()
             },
             'files': results

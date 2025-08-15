@@ -1,6 +1,8 @@
 import requests
 import base64
+import time
 from typing import List, Dict, Optional
+from tqdm import tqdm
 from config import Config
 
 class GitHubClient:
@@ -60,27 +62,38 @@ class GitHubClient:
     
     def get_all_files(self, repo: str, path: str = "") -> List[Dict]:
         """모든 파일 재귀적으로 가져오기"""
+        print(f"{repo} 파일 탐색 중...")
         all_files = []
         
-        contents = self.get_repo_contents(repo, path)
-        if not contents:
-            return all_files
+        def _recursive_get_files(current_path: str, pbar: tqdm):
+            contents = self.get_repo_contents(repo, current_path)
+            if not contents:
+                return
+            
+            for item in contents:
+                pbar.set_description(f"탐색 중: {item['path']}")
+                
+                if item['type'] == 'file':
+                    # 지원하는 확장자만 필터링
+                    if any(item['name'].endswith(ext) for ext in Config.SUPPORTED_EXTENSIONS):
+                        all_files.append({
+                            'name': item['name'],
+                            'path': item['path'],
+                            'size': item['size'],
+                            'download_url': item['download_url']
+                        })
+                        pbar.update(1)
+                elif item['type'] == 'dir':
+                    # 디렉토리면 재귀 호출
+                    _recursive_get_files(item['path'], pbar)
+                
+                # API 속도 제한 방지
+                time.sleep(0.1)
         
-        for item in contents:
-            if item['type'] == 'file':
-                # 지원하는 확장자만 필터링
-                if any(item['name'].endswith(ext) for ext in Config.SUPPORTED_EXTENSIONS):
-                    all_files.append({
-                        'name': item['name'],
-                        'path': item['path'],
-                        'size': item['size'],
-                        'download_url': item['download_url']
-                    })
-            elif item['type'] == 'dir':
-                # 디렉토리면 재귀 호출
-                sub_files = self.get_all_files(repo, item['path'])
-                all_files.extend(sub_files)
+        with tqdm(desc="파일 스캔", unit="파일") as pbar:
+            _recursive_get_files(path, pbar)
         
+        print(f"총 {len(all_files)}개 파일 발견")
         return all_files
     
     def get_pull_request(self, repo: str, pr_number: int) -> Optional[Dict]:

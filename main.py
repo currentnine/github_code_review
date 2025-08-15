@@ -1,13 +1,16 @@
 import sys
 import argparse
 import os
+import time
 from typing import List, Dict
+from tqdm import tqdm
 
 from config import Config
 from github_client import GitHubClient
 from llm_analyzer import LLMAnalyzer
 from report_generator import ReportGenerator
 from security_check import SecurityChecker
+from progress_utils import Timer, ProgressTracker, show_progress_summary
 
 class CodeReviewAssistant:
     def __init__(self):
@@ -31,7 +34,7 @@ class CodeReviewAssistant:
         print(f"스타: {repo_info.get('stargazers_count', 0)}")
         
         # 파일 목록 가져오기
-        print("\n파일 목록 수집 중...")
+        print("\n 파일 목록 수집 중...")
         all_files = self.github_client.get_all_files(repo)
         
         if not all_files:
@@ -52,16 +55,22 @@ class CodeReviewAssistant:
         
         # 파일 내용 다운로드
         files_with_content = []
-        for file_info in valid_files:
-            print(f"다운로드: {file_info['path']}")
-            content = self.github_client.get_file_content(repo, file_info['path'])
-            
-            if content:
-                files_with_content.append({
-                    'path': file_info['path'],
-                    'content': content,
-                    'size': file_info['size']
-                })
+        print(f"\n파일 다운로드 진행...")
+        
+        with tqdm(valid_files, desc="다운로드", unit="파일") as pbar:
+            for file_info in pbar:
+                pbar.set_description(f"다운로드: {file_info['name']}")
+                content = self.github_client.get_file_content(repo, file_info['path'])
+                
+                if content:
+                    files_with_content.append({
+                        'path': file_info['path'],
+                        'content': content,
+                        'size': file_info['size']
+                    })
+                
+                # API 속도 제한 방지
+                time.sleep(0.2)
         
         # LLM 분석 실행
         if files_with_content:
@@ -81,7 +90,7 @@ class CodeReviewAssistant:
             return {}
         
         print(f"제목: {pr_info.get('title')}")
-        print(f"👤 작성자: {pr_info.get('user', {}).get('login')}")
+        print(f"작성자: {pr_info.get('user', {}).get('login')}")
         print(f"상태: {pr_info.get('state')}")
         
         # PR에서 변경된 파일들 가져오기
@@ -90,31 +99,36 @@ class CodeReviewAssistant:
             print("변경된 파일을 찾을 수 없습니다.")
             return {}
         
-        print(f"변경된 파일: {len(pr_files)}개")
+        print(f" 변경된 파일: {len(pr_files)}개")
         
         # 분석할 파일 준비
         files_with_content = []
-        for file_info in pr_files:
-            # 삭제된 파일은 제외
-            if file_info.get('status') == 'removed':
-                continue
-            
-            # 지원하는 확장자만 분석
-            filename = file_info.get('filename', '')
-            if not any(filename.endswith(ext) for ext in Config.SUPPORTED_EXTENSIONS):
-                continue
-            
-            print(f"분석: {filename}")
-            content = self.github_client.get_file_content(repo, filename)
-            
-            if content:
-                files_with_content.append({
-                    'path': filename,
-                    'content': content,
-                    'changes': file_info.get('changes', 0),
-                    'additions': file_info.get('additions', 0),
-                    'deletions': file_info.get('deletions', 0)
-                })
+        print(f"\n변경된 파일 다운로드...")
+        
+        with tqdm(pr_files, desc="PR 파일 처리", unit="파일") as pbar:
+            for file_info in pbar:
+                # 삭제된 파일은 제외
+                if file_info.get('status') == 'removed':
+                    continue
+                
+                # 지원하는 확장자만 분석
+                filename = file_info.get('filename', '')
+                if not any(filename.endswith(ext) for ext in Config.SUPPORTED_EXTENSIONS):
+                    continue
+                
+                pbar.set_description(f"처리: {filename}")
+                content = self.github_client.get_file_content(repo, filename)
+                
+                if content:
+                    files_with_content.append({
+                        'path': filename,
+                        'content': content,
+                        'changes': file_info.get('changes', 0),
+                        'additions': file_info.get('additions', 0),
+                        'deletions': file_info.get('deletions', 0)
+                    })
+                
+                time.sleep(0.1)
         
         # LLM 분석 실행
         if files_with_content:
@@ -133,13 +147,13 @@ class CodeReviewAssistant:
         
         # 보안 검사 (로컬 프로젝트만)
         if not skip_security_check:
-            print("\n🔒 보안 검사 실행 중...")
+            print("\n보안 검사 실행 중...")
             security_issues = self.security_checker.check_directory(project_path)
             
             if security_issues:
                 print("보안 문제 발견!")
                 for issue in security_issues:
-                    print(f"   {issue['file']}:{issue['line']}")
+                    print(f"    {issue['file']}:{issue['line']}")
                     print(f"      {issue['content']}")
                 
                 user_choice = input("\n계속 진행하시겠습니까? (y/N): ").lower()
@@ -152,22 +166,29 @@ class CodeReviewAssistant:
         
         # 로컬 파일 수집
         files_with_content = []
+        print(f" 로컬 파일 스캔 중...")
         
+        # 먼저 모든 파일 경로 수집
+        all_file_paths = []
         for root, dirs, files in os.walk(project_path):
             # 제외할 디렉토리
             dirs[:] = [d for d in dirs if d not in {'.git', '__pycache__', 'node_modules', 'venv', '.vscode'}]
             
             for file in files:
                 # 지원하는 확장자만
-                if not any(file.endswith(ext) for ext in Config.SUPPORTED_EXTENSIONS):
-                    continue
-                
-                file_path = os.path.join(root, file)
+                if any(file.endswith(ext) for ext in Config.SUPPORTED_EXTENSIONS):
+                    file_path = os.path.join(root, file)
+                    if os.path.getsize(file_path) <= Config.MAX_FILE_SIZE:
+                        all_file_paths.append(file_path)
+        
+        # 파일 수 제한
+        all_file_paths = all_file_paths[:Config.MAX_FILES_PER_ANALYSIS]
+        
+        # 프로그레스 바와 함께 파일 읽기
+        with tqdm(all_file_paths, desc="파일 읽기", unit="파일") as pbar:
+            for file_path in pbar:
                 relative_path = os.path.relpath(file_path, project_path)
-                
-                # 파일 크기 체크
-                if os.path.getsize(file_path) > Config.MAX_FILE_SIZE:
-                    continue
+                pbar.set_description(f"읽기: {relative_path}")
                 
                 try:
                     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -178,18 +199,9 @@ class CodeReviewAssistant:
                         'content': content,
                         'size': os.path.getsize(file_path)
                     })
-                    
-                    print(f"발견: {relative_path}")
-                    
-                    # 파일 수 제한
-                    if len(files_with_content) >= Config.MAX_FILES_PER_ANALYSIS:
-                        break
                         
                 except Exception as e:
-                    print(f"파일 읽기 실패 ({relative_path}): {e}")
-            
-            if len(files_with_content) >= Config.MAX_FILES_PER_ANALYSIS:
-                break
+                    pbar.write(f"파일 읽기 실패 ({relative_path}): {e}")
         
         print(f"분석 대상: {len(files_with_content)}개 파일")
         
@@ -202,7 +214,7 @@ class CodeReviewAssistant:
     
     def run_tests(self) -> bool:
         """연결 테스트 실행"""
-        print("🔧 시스템 연결 테스트 시작...")
+        print("시스템 연결 테스트 시작...")
         
         # 설정 검증
         if not Config.validate():
@@ -281,26 +293,39 @@ def main():
     repo_name = ""
     
     try:
-        if args.repo:
-            analysis_result = assistant.analyze_repository(args.repo, args.max_files)
-            repo_name = args.repo
-        elif args.pr:
-            # PR 형식 파싱: user/repo/number
-            parts = args.pr.split('/')
-            if len(parts) >= 3:
-                repo = '/'.join(parts[:-1])
-                pr_number = int(parts[-1])
-                analysis_result = assistant.analyze_pull_request(repo, pr_number)
-                repo_name = f"{repo}/PR#{pr_number}"
-            else:
-                print("PR 형식이 올바르지 않습니다. (user/repo/number)")
-                return
-        elif args.local:
-            analysis_result = assistant.analyze_local_project(args.local, args.skip_security)
-            repo_name = os.path.basename(args.local)
+        with Timer("전체 분석"):
+            if args.repo:
+                analysis_result = assistant.analyze_repository(args.repo, args.max_files)
+                repo_name = args.repo
+            elif args.pr:
+                # PR 형식 파싱: user/repo/number
+                parts = args.pr.split('/')
+                if len(parts) >= 3:
+                    repo = '/'.join(parts[:-1])
+                    pr_number = int(parts[-1])
+                    analysis_result = assistant.analyze_pull_request(repo, pr_number)
+                    repo_name = f"{repo}/PR#{pr_number}"
+                else:
+                    print("PR 형식이 올바르지 않습니다. (user/repo/number)")
+                    return
+            elif args.local:
+                analysis_result = assistant.analyze_local_project(args.local, args.skip_security)
+                repo_name = os.path.basename(args.local)
+                
+        # 분석 결과 요약 표시
+        if analysis_result and analysis_result.get('summary'):
+            summary = analysis_result['summary']
+            show_progress_summary(
+                summary.get('total_files', 0),
+                summary.get('analysis_time', 0),
+                summary.get('average_score', 0)
+            )
     
     except KeyboardInterrupt:
         print("\n사용자에 의해 중단되었습니다.")
+        return
+    except Exception as e:
+        print(f"오류 발생: {e}")
         return
     except Exception as e:
         print(f"오류 발생: {e}")
